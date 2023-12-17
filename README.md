@@ -19,6 +19,12 @@ Hanabi小助手的AI模型采用了类似[LLama2](https://github.com/karpathy/ll
 ```
 4. 点击```main_connect.exe```启动
 5. 页面的主要功能介绍如下所示:
+<a href="https://github.com/UnbSky/Hanabi-AI-Assitant">
+    <img src="pics/txt_ui1_zh.png">
+</a>
+<a href="https://github.com/UnbSky/Hanabi-AI-Assitant">
+    <img src="pics/txt_ui2_zh.png">
+</a>
 
 ### 源码及环境说明
 1. 下载源码
