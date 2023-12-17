@@ -34,8 +34,9 @@ Hanabi小助手的AI模型采用了类似[LLama2](https://github.com/karpathy/ll
 5. 运行```main_connect.py```启动UI界面
 
 ## 模型介绍
-模型目前支持2-5人对战的14种玩法，AI自己和自己对战的具体得分如下，每一行的条件测试数据为500局
-Human Data表示该类型玩法训练中的玩家对局数, AI Data表示该类型玩法训练中补充的一部分由AI自己对局优化得来的对局数，All Data表示总共的训练对局数
+模型目前支持2-5人对战的14种玩法，AI自己和自己对战的具体得分如下，每一行的条件测试数据为500局。
+
+Human Data表示该类型玩法训练中的玩家对局数， AI Data表示该类型玩法训练中补充的一部分由AI自己对局优化得来的对局数，All Data表示总共的训练对局数。
 <a href="https://github.com/UnbSky/Hanabi-AI-Assitant">
     <img src="pics/score_table.png">
 </a>
