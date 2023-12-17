@@ -34,6 +34,10 @@ Hanabi小助手的AI模型采用了类似[LLama2](https://github.com/karpathy/ll
 
 Human Data表示该类型玩法训练中的玩家对局数， AI Data表示该类型玩法训练中补充的一部分由AI自己对局优化得来的对局数，All Data表示总共的训练对局数。
 ![image](https://github.com/UnbSky/Hanabi-AI-Assitant/blob/main/pics/score_table.png)
+
+## 目前已知问题
+1. 若所在的房间重开，会导致闪退，重新启动即可（会自动加回之前的的房间）
+
 ## 其他
  在 [这里](https://github.com/UnbSky/Hanabi-AI-Assitant/issues) 写下出现的问题或者建议
 
