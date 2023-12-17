@@ -1,0 +1,7 @@
+tqdm
+numpy
+torch==2.0
+PyQt5
+requests
+dataclasses
+websocket
