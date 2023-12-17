@@ -1,6 +1,6 @@
 # Hanabi-AI-Assitant
 ## 简介
-Hanabi-AI-Assitant（Hanabi小助手）是一个通过神经网络学习玩家对局行为来进行hanabi及其部分拓展玩法游戏的AI，目标是通过一个模型学会不同人数乃至不同扩展的Hanabi玩法，同时拥有能和真人合作的能力，为了提高模型的易用性，我们将其接入了[hanabi.live](https://hanab.live/)， 可以直接通过该网站的账号使用该Hanabi小助手加入对局或者观战对局，UI中可以看到AI建议的操作。
+Hanabi-AI-Assitant（Hanabi小助手）是一个通过神经网络学习玩家对局行为来进行hanabi及其部分拓展玩法游戏的AI，目标是通过一个模型学会不同人数乃至不同扩展的Hanabi玩法，同时拥有能和真人合作的能力，为了提高模型的易用性，我们将其接入了[hanabi.live](https://hanab.live/)， 可以直接通过该网站的账号使用该Hanabi小助手加入对局或者观战对局(暂时不支持创建房间)，UI中可以看到AI建议的操作。
 
 Hanabi小助手的AI模型采用了类似[LLama2](https://github.com/karpathy/llama2.c/) 的模型结构，与hanabi.live服务器交互的逻辑主要参考了[Zamiell's example bot](https://github.com/Hanabi-Live/hanabi-live-bot/) 。训练的玩家数据来自[hanabi.live](https://hanab.live/) 上的部分玩家对局回放。
 
