@@ -1,5 +1,8 @@
 {
     "username": "",
     "password": "",
-    "model": "model/HHmodel_v1_s56"
+    "model": "model/HHmodel_a1[S37_D123K_n]",
+    "online": false,
+    "mark": false
 }
+

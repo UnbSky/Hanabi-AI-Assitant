@@ -1,71 +1,19 @@
 import copy
 import traceback
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtWidgets import QWidget, QPushButton, QVBoxLayout, QMainWindow, QLabel, QHBoxLayout, QGridLayout, QScrollBar, QFileDialog, QDesktopWidget
 from main import Ui_AIUI
-from game_controller import GameController, GameArgs
+from game_controller_v2 import GameController, GameArgs
+from util_ui import ValueButton, CardButton
 import websocket
 import json
+import threading
 
 class ACTION:
     PLAY = 0
     DISCARD = 1
     COLOR_CLUE = 2
     RANK_CLUE = 3
-
-class CardButton(QWidget):
-    def __init__(self, left_text, right_text, left_color, right_color, active_func, value, choices=None, parent=None):
-        super().__init__(parent)
-        top_widget = QWidget(self)
-        top_widget.setFixedSize(120, 90)
-
-        bottom_widget = QWidget(self)
-        bottom_widget.setFixedSize(120, 10)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(top_widget)
-        layout.addWidget(bottom_widget)
-
-        self.setLayout(layout)
-        self.setFixedSize(120, 100)
-
-        self.left_button = QPushButton(left_text)
-        self.right_button = QPushButton(right_text)
-        self.value = value
-
-        self.left_color = left_color
-        self.right_color = right_color
-        self.left_button.setStyleSheet(f"{left_color}; font: bold 36px;")
-        self.right_button.setStyleSheet(f"{right_color}; font: bold 36px;")
-
-        self.left_button.clicked.connect(lambda _, xx=value: active_func(xx))
-        self.right_button.clicked.connect(lambda _, xx=value: active_func(xx))
-
-        layout = QHBoxLayout(top_widget)
-        layout.addWidget(self.left_button)
-        layout.addWidget(self.right_button)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-    def highlight(self, lighted):
-        if lighted:
-            self.left_button.setStyleSheet(f"{self.left_color}; font: bold 45px;")
-            self.right_button.setStyleSheet(f"{self.right_color}; font: bold 45px;")
-        else:
-            self.left_button.setStyleSheet(f"{self.left_color}; font: bold 36px;")
-            self.right_button.setStyleSheet(f"{self.right_color}; font: bold 36px;")
-
-
-class ValueButton(QPushButton):
-    def __init__(self, text="", value=None, parent=None):
-        super().__init__(text, parent)
-        self._value = value
-
-    def set_value(self, value):
-        self._value = value
-
-    def get_value(self):
-        return self._value
 
 class ClientThread(QThread):
     update_table_ui_sig = pyqtSignal(dict)
@@ -241,6 +189,7 @@ class ClientThread(QThread):
         self.handle_action(data["action"], data["tableID"])
 
     def game_action_list(self, data):
+        # print("game_action_list", data["list"])
         for action in data["list"]:
             self.handle_action(action, data["tableID"])
 
@@ -271,18 +220,16 @@ class AIWindow(QMainWindow, Ui_AIUI):
         #self.setFixedSize(1300, 1200)
         self.setWindowTitle("HanabiAIAssitant")
 
-        self.nextstep_btn.setEnabled(False)
-        self.prevstep_btn.setEnabled(False)
-        self.openhistory_btn.setEnabled(False)
-
         #连接服务器的线程
-        self.worker_thread = ClientThread(url, cookie)
-        self.worker_thread.game_over_sig.connect(self.game_over)
-        self.worker_thread.update_table_ui_sig.connect(self.update_table_info)
-        self.worker_thread.handle_action_sig.connect(self.handle_action)
-        self.worker_thread.ws_load_sig.connect(self.ws_load)
-        self.worker_thread.game_start_sig.connect(self.game_start)
-        self.worker_thread.table_joined_sig.connect(self.table_joined)
+        self.worker_thread = None
+        if url is not None:
+            self.worker_thread = ClientThread(url, cookie)
+            self.worker_thread.game_over_sig.connect(self.game_over)
+            self.worker_thread.update_table_ui_sig.connect(self.update_table_info)
+            self.worker_thread.handle_action_sig.connect(self.handle_action, Qt.BlockingQueuedConnection)
+            self.worker_thread.ws_load_sig.connect(self.ws_load)
+            self.worker_thread.game_start_sig.connect(self.game_start, Qt.BlockingQueuedConnection)
+            self.worker_thread.table_joined_sig.connect(self.table_joined)
 
         self.enable_active_btn(False)
         self.game_controller = GameController(model_data)
@@ -290,7 +237,7 @@ class AIWindow(QMainWindow, Ui_AIUI):
         self.support_variant = [
             "No Variant", "6 Suits", "Black (5 Suits)", "Black (6 Suits)", "Rainbow (5 Suits)", "Rainbow (6 Suits)",
             "Brown (5 Suits)", "Brown (6 Suits)", "Dark Rainbow (6 Suits)", "White (5 Suits)", "White (6 Suits)",
-            "Pink (5 Suits)", "Pink (6 Suits)", "Gray (6 Suits)"
+            "Pink (5 Suits)", "Pink (6 Suits)", "Gray (6 Suits)", "Null (5 Suits)", "Null (6 Suits)", "Omni (5 Suits)", "Omni (6 Suits)"
         ]
 
         self.play_btn.clicked.connect(self.play_clicked)
@@ -307,8 +254,12 @@ class AIWindow(QMainWindow, Ui_AIUI):
         self.tables = {}
         self.room_label.setWordWrap(3)
 
+        self.lock = threading.Lock()
+
         #连接服务器
-        self.worker_thread.start()
+        if self.worker_thread is not None:
+            self.worker_thread.start()
+
         #0表示在房间里,1表示等待中,2表示游戏中
         self.in_room_status = 0
 
@@ -388,7 +339,6 @@ class AIWindow(QMainWindow, Ui_AIUI):
         self.ws = ws["ws"]
 
     def game_start(self, data):
-        print(data)
         tableID = data["tableID"]
         self.clear_UI()
         try:
@@ -415,16 +365,22 @@ class AIWindow(QMainWindow, Ui_AIUI):
                 (173, 216, 230)  # 淡青
             ]
             self.index_to_color = [f"background-color: rgb{color}" for color in colors]
+            self.history_mode = True
 
-            table_info = self.tables[tableID]
-            table_id = table_info["id"]
-            numPlayers = table_info["numPlayers"]
-            variant = table_info["variant"]
-            players = table_info["players"]
-            name = table_info["name"]
-            table_str = f"{name}\n 游戏开始 ID:{table_id} P:{numPlayers} \n模式:{variant} \n 玩家:{players}"
+            if "history" not in data:
+                self.history_mode = False
+                self.nextstep_btn.setEnabled(False)
+                self.prevstep_btn.setEnabled(False)
+                self.openhistory_btn.setEnabled(False)
+                table_info = self.tables[tableID]
+                table_id = table_info["id"]
+                numPlayers = table_info["numPlayers"]
+                variant = table_info["variant"]
+                players = table_info["players"]
+                name = table_info["name"]
+                table_str = f"{name}\n 游戏开始 ID:{table_id} P:{numPlayers} \n模式:{variant} \n 玩家:{players}"
+                self.room_label.setText(table_str)
 
-            self.room_label.setText(table_str)
             self.in_room_status = 2
             self.update_table_info(self.tables)
             self.online_action_list = []
@@ -434,7 +390,7 @@ class AIWindow(QMainWindow, Ui_AIUI):
             self.table_id = data["tableID"]
             self.game_actions = []
             self.player_count = data["options"]["numPlayers"]
-            self.spectating = data["spectating"]
+            self.spectating = data["spectating"] or data["replay"]
             self.playerNames = data["playerNames"]
             if self.player_count <= 3:
                 self.card_count = 5
@@ -473,6 +429,9 @@ class AIWindow(QMainWindow, Ui_AIUI):
             elif "Rainbow" in self.varient_name:
                 self.clue_replace[f"I{special_dict.last_special_card}"] = "彩虹"
                 self.index_to_color[special_dict.last_special_card] = "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FFB6C1, stop:0.17 #FFE4C4, stop:0.33 #FFFFE0, stop:0.50 #98FB98, stop:0.67 #ADD8E6, stop:0.83 #E6E6FA, stop:1 #E3E3E3);"
+            elif "Omni" in self.varient_name:
+                self.clue_replace[f"I{special_dict.last_special_card}"] = "恶魔"
+                self.index_to_color[special_dict.last_special_card] = "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FFB6C1, stop:0.17 #FFE4C4, stop:0.33 #FFFFE0, stop:0.50 #98FB98, stop:0.67 #ADD8E6, stop:0.83 #E6E6FA, stop:1 #E3E3E3);"
             elif "Brown" in self.varient_name:
                 self.clue_replace[f"I{special_dict.last_special_card}"] = "棕色"
                 self.index_to_color[special_dict.last_special_card] = f"background-color: rgb(205, 133, 63)"
@@ -488,6 +447,9 @@ class AIWindow(QMainWindow, Ui_AIUI):
             elif "Gray" in self.varient_name:
                 self.clue_replace[f"I{special_dict.last_special_card}"] = "灰色"
                 self.index_to_color[special_dict.last_special_card] = f"background-color: rgb(220, 220, 220)"
+            elif "Null" in self.varient_name:
+                self.clue_replace[f"I{special_dict.last_special_card}"] = "空白"
+                self.index_to_color[special_dict.last_special_card] = f"background-color: rgb(253, 253, 253)"
             self.setup_button_pannel(self.player_count)
 
         except Exception as e:
@@ -513,6 +475,7 @@ class AIWindow(QMainWindow, Ui_AIUI):
                     fake_game_data = {
                         "tableID": 1,
                         "spectating": True,
+                        "history": True,
                         "playerNames": ["AI0","AI1","AI2","AI3","AI4","AI5"],
                         "options":{
                             "numPlayers": int(game_args[1][0]),
@@ -523,32 +486,92 @@ class AIWindow(QMainWindow, Ui_AIUI):
                     self.current_history_index = 0
                     self.game_controller.game_history = history_data
 
-                    action = self.game_controller.set_current_history(self.current_history_index)
+                    action, action_predict, action_details = self.game_controller.set_current_history(self.current_history_index, 10)
+                    self.update_AI_choice(action_predict, action_details, 10)
                     #print("Update History")
                     self.update_all_game_info()
                     #print("update_all_game_info")
                     self.info_label.setText(f'选择操作: {action["str"]}')
                     #print("setText")
+
+                    self.history_buttons = []
+                    # 更新历史消息(历史对局只用在初始化的时候更新一次)
+                    lb = QVBoxLayout()
+                    game_len = len(history_data)
+                    for i in range(game_len - 1, -1, -1):
+                        history_dict = history_data[i]
+                        hand_card = len(history_dict["cards"][0])
+                        action = history_dict["action"]
+                        action_type = action["type"]
+                        if action_type == "play":
+                            history_str = f"P{action['pid']}-出牌:第{hand_card - action['pos']}张牌"
+                        elif action_type == "discard":
+                            history_str = f"P{action['pid']}-弃牌:第{hand_card - action['pos']}张牌"
+                        elif action_type == "clue":
+                            history_str = f"P{action['from']}提示P{action['to']}:{action['clue']}"
+                        button = QPushButton(f"{history_str}", self)
+                        button.clicked.connect(lambda _, xx=i: self.index_history_clicked(xx))
+                        button.setFixedSize(200, 45)
+                        self.history_buttons.append(button)
+                        lb.addWidget(button)
+
+                    self.highlight_history(0)
+                    lb.addStretch(1)
+                    a = QWidget()
+                    a.setLayout(lb)
+                    self.history_area.setWidget(a)
                 except Exception as e:
                     print(f'Error reading history: {e}')
                     traceback.print_exc()
 
-    def next_history_clicked(self):
-        if self.current_history_index < len(self.game_controller.game_history) - 1:
-            self.current_history_index += 1
-        action = self.game_controller.set_current_history(self.current_history_index)
+    def highlight_history(self, index):
+        # 将这个history_button的文字加粗，并将其他history_button的文字取消加粗
+        for i, button in enumerate(self.history_buttons):
+            font = button.font()
+            if len(self.history_buttons) - i - 1 == index:
+                font.setBold(True)
+            else:
+                font.setBold(False)
+            button.setFont(font)
+
+        # v_scrollbar = self.history_area.findChild(QScrollBar)
+        # if v_scrollbar:
+        #     pos = len(self.history_buttons) - index - 1
+        #     scrollbar_value = (pos / len(self.history_buttons)) *  v_scrollbar.maximum()
+        #     print(v_scrollbar.minimum(), scrollbar_value, v_scrollbar.maximum())
+        #     scrollbar_value = max(scrollbar_value, v_scrollbar.minimum())
+        #     scrollbar_value = min(scrollbar_value, v_scrollbar.maximum())
+        #
+        #     v_scrollbar.setValue(scrollbar_value)
+
+    def index_history_clicked(self, index):
+        self.current_history_index = index
+        action, action_predict, action_details = self.game_controller.set_current_history(self.current_history_index, 10)
+        self.update_AI_choice(action_predict, action_details, 10)
         self.active_pid = self.game_controller.active_pid
         self.update_all_game_info()
         self.info_label.setText(f'选择操作: {action["str"]}')
+        self.highlight_history(self.current_history_index)
+
+    def next_history_clicked(self):
+        if self.current_history_index < len(self.game_controller.game_history) - 1:
+            self.current_history_index += 1
+        action, action_predict, action_details = self.game_controller.set_current_history(self.current_history_index, 10)
+        self.update_AI_choice(action_predict, action_details, 10)
+        self.active_pid = self.game_controller.active_pid
+        self.update_all_game_info()
+        self.info_label.setText(f'选择操作: {action["str"]}')
+        self.highlight_history(self.current_history_index)
 
     def prev_history_clicked(self):
         if self.current_history_index > 0:
             self.current_history_index -= 1
-        action = self.game_controller.set_current_history(self.current_history_index)
+        action, action_predict, action_details = self.game_controller.set_current_history(self.current_history_index, 10)
+        self.update_AI_choice(action_predict, action_details, 10)
         self.active_pid = self.game_controller.active_pid
         self.update_all_game_info()
         self.info_label.setText(f'选择操作: {action["str"]}')
-
+        self.highlight_history(self.current_history_index)
 
     def ai_action_clicked(self, action_detail):
         act_type = action_detail["type"]
@@ -603,6 +626,10 @@ class AIWindow(QMainWindow, Ui_AIUI):
 
     def leave_table_clicked(self):
         try:
+            self.nextstep_btn.setEnabled(True)
+            self.prevstep_btn.setEnabled(True)
+            self.openhistory_btn.setEnabled(True)
+
             if self.in_room_status == 2:
                 #游戏已经开始,暴力退出
                 self.send(
@@ -797,49 +824,57 @@ class AIWindow(QMainWindow, Ui_AIUI):
 
     def call_next_round(self, active_pid):
         try:
-            lb = QVBoxLayout()
             self.active_pid = active_pid
             self.info_label.setText(f"轮到P{active_pid}【{self.playerNames[active_pid]}】操作")
             if len(self.AI_pids) > 0:
                 if active_pid == self.AI_pids[0] and (not self.spectating):
                     self.info_label.setText(f"轮到P{active_pid}【{self.playerNames[active_pid]}】【你自己！】操作")
 
+            lb = QVBoxLayout()
             if active_pid in self.AI_pids:
                 #向AI查询预测结果
                 if not self.spectating:
                     self.enable_active_btn(True)
-                action_predict = self.game_controller.call_AI_predict(active_pid, 10)
-                for action in action_predict:
-                    action_token = action["token"]
-                    action_probs = action["probs"]
-                    action_detail = self.game_controller.get_action(action_token, active_pid)
-                    action_desc = action_detail["str"]
-                    for clue_r in self.clue_replace:
-                        if clue_r in action_desc:
-                            #print(clue_r)
-                            action_desc = action_desc.replace(clue_r, self.clue_replace[clue_r])
-                            break
-                    action_str = f'{action_desc} \n 概率:{action_probs*100:.2f}%'
-                    actionbutton = ValueButton(action_str, action_detail)
-                    actionbutton.setStyleSheet(f"font: bold 18px;")
-                    actionbutton.setFixedSize(330, 50)
-                    actionbutton.clicked.connect(lambda _, i=copy.deepcopy(action_detail): self.ai_action_clicked(i))
-                    if self.spectating:
-                        actionbutton.setEnabled(False)
-                    else:
-                        actionbutton.setEnabled(True)
-                    lb.addWidget(actionbutton)
+                action_predict, action_details = self.game_controller.call_AI_predict(active_pid, 10)
+                self.update_AI_choice(action_predict, action_details, 10)
             else:
+                lb = QVBoxLayout()
                 self.enable_active_btn(False)
+                lb.addStretch(1)
+                a = QWidget()
+                a.setLayout(lb)
+                self.AIpredict_area.setWidget(a)
 
-            lb.addStretch(1)
-            a = QWidget()
-            a.setLayout(lb)
-            self.AIpredict_area.setWidget(a)
-            print("Call_next_round Finish")
+            print(f"Call_next_round Finish pid:{active_pid} round:{self.game_controller.round}")
         except Exception as e:
             print(e)
             traceback.print_exc()
+
+    def update_AI_choice(self, action_predict, action_details, topk):
+        lb = QVBoxLayout()
+        for i in range(topk):
+            action_probs = action_predict[i]["probs"]
+            action_detail = action_details[i]
+            action_desc = action_detail["str"]
+            for clue_r in self.clue_replace:
+                if clue_r in action_desc:
+                    # print(clue_r)
+                    action_desc = action_desc.replace(clue_r, self.clue_replace[clue_r])
+                    break
+            action_str = f'{action_desc} \n 概率:{action_probs * 100:.2f}%'
+            actionbutton = ValueButton(action_str, action_detail)
+            actionbutton.setStyleSheet(f"font: bold 18px;")
+            actionbutton.setFixedSize(330, 50)
+            actionbutton.clicked.connect(lambda _, i=copy.deepcopy(action_detail): self.ai_action_clicked(i))
+            if self.spectating:
+                actionbutton.setEnabled(False)
+            else:
+                actionbutton.setEnabled(True)
+            lb.addWidget(actionbutton)
+        lb.addStretch(1)
+        a = QWidget()
+        a.setLayout(lb)
+        self.AIpredict_area.setWidget(a)
 
     def update_game_state(self):
         state_txt = f"得分:{self.game_controller.score}/{sum(self.game_controller.Hrank)}\n线索:{self.game_controller.clue}" \
@@ -856,21 +891,23 @@ class AIWindow(QMainWindow, Ui_AIUI):
             score = self.game_controller.Irank[i]
             self.scoreLabels[i].setText(f"{score}")
 
-        #更新历史消息
-        lb = QVBoxLayout()
-        for history_str in self.online_action_list:
-            button = QPushButton(f"{history_str}", self)
-            button.setFixedSize(200, 40)
-            lb.addWidget(button)
-        lb.addStretch(1)
-        a = QWidget()
-        a.setLayout(lb)
+        #更新历史消息(非查看历史对局)
+        if not self.history_mode:
+            self.history_buttons = []
+            lb = QVBoxLayout()
+            for history_str in reversed(self.online_action_list):
+                button = QPushButton(f"{history_str}", self)
+                self.history_buttons.append(button)
+                button.setFixedSize(200, 45)
+                lb.addWidget(button)
+            lb.addStretch(1)
+            a = QWidget()
+            a.setLayout(lb)
+            self.history_area.setWidget(a)
 
-        self.history_area.setWidget(a)
-
-        v_scrollbar = self.history_area.findChild(QScrollBar)
-        if v_scrollbar:
-            v_scrollbar.setValue(v_scrollbar.maximum())
+            v_scrollbar = self.history_area.findChild(QScrollBar)
+            if v_scrollbar:
+                v_scrollbar.setValue(v_scrollbar.maximum())
 
         #更新弃牌堆信息
         lg = QGridLayout()

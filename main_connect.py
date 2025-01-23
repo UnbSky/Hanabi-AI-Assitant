@@ -65,12 +65,16 @@ def main():
     username = user_args["username"]
     password = user_args["password"]
     model_name = user_args["model"]
+    online = user_args["online"]
 
     printf("Load Model")
     model, action_dict_toact, action_dict_toid, output_action_dict_toact, output_action_dict_toid, device = load_model(model_name)
 
-    printf("Try Login")
-    ws_url, cookie = login_to_hanab(username, password)
+    ws_url = None
+    cookie = None
+    if online:
+        printf("Try Login")
+        ws_url, cookie = login_to_hanab(username, password)
 
     printf("Launch UI")
     #QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling)
@@ -82,3 +86,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#UnbSky_bot
+#unbbot
+
+#迭代式的

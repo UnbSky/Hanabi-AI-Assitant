@@ -59,7 +59,8 @@ def load_model(model_name=None):
         )  # s
     else:
         with open(f'{model_name}/config.json', 'r') as json_file:
-            model_args = json.load(json_file)
+            model_config = json.load(json_file)
+            model_args = model_config["model_args"]
 
     seed = 1337
     torch.manual_seed(seed)
@@ -90,7 +91,6 @@ def generate_answer(model, input_actions, acition_dict_toid, device, topk):
         if len(action) < 1:
             continue
         if any(char.isalpha() for char in action):
-            action = action.replace("light-myself","light_myself")
             action = action.strip()
             if action not in acition_dict_toid:
                 print(f"NULL[{action}]")
@@ -103,5 +103,45 @@ def generate_answer(model, input_actions, acition_dict_toid, device, topk):
     idx, probs = model.play_topk(input_id, topk)
     return idx, probs
 
-
+def generate_answer_ahead(model, input_actions, input_pos, acition_dict_toid, output_action_dict_toact, device, topk, ahead_step, ahead_p):
+    input_id = []
+    for action in input_actions:
+        if len(action) < 1:
+            continue
+        if any(char.isalpha() for char in action):
+            action = action.replace("light-myself","light_myself")
+            action = action.strip()
+            if action not in acition_dict_toid:
+                #print(f"NULL[{action}]")
+                return f"NULL[{action}]"
+            input_id.append(acition_dict_toid[action])
+    input_id = np.array([input_id])
+    input_id = torch.from_numpy(input_id)
+    input_id = input_id.to(device)
+    idx, probs = model.play_topk(input_id, topk)
+    max_prob = 0
+    return_idx = None
+    ind = 0
+    for ava_id in idx:
+        input_next_id = input_id
+        current_prob = probs[ind]
+        current_action = output_action_dict_toact[ava_id]
+        # current_action = current_action.replace("light-myself","light_myself")
+        next_id = acition_dict_toid[current_action]
+        next_id = torch.tensor(np.array([[next_id]])).to(device)
+        # print(current_action)
+        ind += 1
+        for step in range(ahead_step):
+            input_next_id = torch.cat((input_next_id, next_id), dim=1)
+            next_id, prob = model.play_topk(input_next_id, 1)
+            next_action = output_action_dict_toact[next_id]
+            # print(next_action)
+            next_id = acition_dict_toid[next_action]
+            next_id = torch.tensor(np.array([[next_id]])).to(device)
+            current_prob += prob * pow(ahead_p, step + 1)
+        if current_prob > max_prob:
+            max_prob = current_prob
+            return_idx = ava_id
+        # print(ava_id, current_prob)
+    return return_idx, max_prob
 

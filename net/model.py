@@ -1,11 +1,16 @@
 import math
+import struct
 import inspect
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
+import threading
+import re
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+
 
 @dataclass
 class ModelArgs:
@@ -19,6 +24,7 @@ class ModelArgs:
     norm_eps: float = 1e-5
     max_seq_len: int = 2048
     dropout: float = 0.0
+    moe_config: Optional[dict] = None
 
 
 class RMSNorm(torch.nn.Module):
@@ -43,6 +49,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
 
+
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
@@ -50,13 +57,13 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cos: torch.Tensor,
-    freqs_sin: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
 
+def apply_rotary_emb(
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
     # reshape xq and xk to match the complex representation
     xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
@@ -77,6 +84,7 @@ def apply_rotary_emb(
 
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
+
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -84,9 +92,10 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         return x
     return (
         x[:, :, :, None, :]
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+            .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+            .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
+
 
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -114,10 +123,10 @@ class Attention(nn.Module):
             self.register_buffer("mask", mask)
 
     def forward(
-        self,
-        x: torch.Tensor,
-        freqs_cos: torch.Tensor,
-        freqs_sin: torch.Tensor,
+            self,
+            x: torch.Tensor,
+            freqs_cos: torch.Tensor,
+            freqs_sin: torch.Tensor,
     ):
         bsz, seqlen, _ = x.shape
 
@@ -141,12 +150,14 @@ class Attention(nn.Module):
 
         # flash implementation
         if self.flash:
-            output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+            output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None,
+                                                                      dropout_p=self.dropout if self.training else 0.0,
+                                                                      is_causal=True)
         else:
             # manual implementation
             scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
             assert hasattr(self, 'mask')
-            scores = scores + self.mask[:, :, :seqlen, :seqlen]   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = scores + self.mask[:, :, :seqlen, :seqlen]  # (bs, n_local_heads, seqlen, cache_len + seqlen)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
@@ -174,6 +185,46 @@ class FeedForward(nn.Module):
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
+class MoEFeedForward(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.moe_config = args.moe_config
+        self.ffn_experts = nn.ModuleDict({})
+        self.top_k = self.moe_config["top_k"]
+        self.number_experts = self.moe_config["experts"]
+        self.router = nn.Linear(args.dim, self.number_experts, bias=False)
+        for i in range(self.number_experts):
+            feed_forward = FeedForward(
+                dim=args.dim,
+                hidden_dim=2 * args.dim * self.moe_config["rdim"],
+                multiple_of=args.multiple_of,
+                dropout=args.dropout,
+            )
+            self.ffn_experts.update(nn.ModuleDict({f"expert{i}": feed_forward}))
+
+    def forward(self, x):
+        batch_size, sequence_length, hidden_dim = x.shape
+        router_logits = self.router(x)
+        routing_weights_before = F.softmax(router_logits, dim=-1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights_before, self.top_k, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(x.dtype)
+
+        full_routing_weights = torch.zeros((batch_size, sequence_length, self.number_experts),
+                                           dtype=x.dtype, device=x.device)
+        for i in range(batch_size):
+            for j in range(sequence_length):
+                full_routing_weights[i, j, selected_experts[i, j]] = routing_weights[i, j]
+
+        final_hidden_states = torch.zeros(
+            (batch_size, sequence_length, hidden_dim), dtype=x.dtype, device=x.device
+        )
+        for expert_idx in range(self.number_experts):
+            ch = self.ffn_experts[f"expert{expert_idx}"](x)
+            final_hidden_states += ch * full_routing_weights[:, :, expert_idx:expert_idx + 1]
+        return final_hidden_states
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
@@ -181,19 +232,25 @@ class TransformerBlock(nn.Module):
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
         self.attention = Attention(args)
-        self.feed_forward = FeedForward(
-            dim=args.dim,
-            hidden_dim=4 * args.dim,
-            multiple_of=args.multiple_of,
-            dropout=args.dropout,
-        )
+        moe_config = args.moe_config
+        if moe_config is None:
+            self.feed_forward = FeedForward(
+                dim=args.dim,
+                hidden_dim=2 * args.dim,
+                multiple_of=args.multiple_of,
+                dropout=args.dropout,
+            )
+        else:
+            # print("Init MOE FFN")
+            self.feed_forward = MoEFeedForward(args)
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        moe_out = self.feed_forward.forward(self.ffn_norm(h))
+        out = h + moe_out
         return out
 
 
@@ -205,6 +262,7 @@ class Transformer(nn.Module):
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+        self.moe_config = params.moe_config
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
         self.dropout = nn.Dropout(params.dropout)
@@ -227,7 +285,7 @@ class Transformer(nn.Module):
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
+                torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * params.n_layers))
 
         # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
         self.last_loss = None
@@ -257,7 +315,7 @@ class Transformer(nn.Module):
             self.last_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the output on the very last position
-            logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.output(h[:, [-1], :])  # note: using list [-1] to preserve the time dim
             self.last_loss = None
 
         return logits
@@ -294,34 +352,34 @@ class Transformer(nn.Module):
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = sum(p.numel() for p in self.parameters())
         cfg = self.params
-        L, H, Q, T = cfg.n_layers, cfg.n_heads, cfg.dim//cfg.n_heads, cfg.max_seq_len
-        flops_per_token = 6*N + 12*L*H*Q*T
+        L, H, Q, T = cfg.n_layers, cfg.n_heads, cfg.dim // cfg.n_heads, cfg.max_seq_len
+        flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        flops_achieved = flops_per_iter * (1.0 / dt)  # per second
+        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
         mfu = flops_achieved / flops_promised
         return mfu
 
-    #@torch.inference_mode()
+    # @torch.inference_mode()
     @torch.no_grad()
     def play(self, input):
         logits = self(input)
-        logits = logits[:, -1, :] # crop to just the final time step
+        logits = logits[:, -1, :]  # crop to just the final time step
         _, idx = torch.topk(logits, k=1, dim=-1)
         _, idx_k3 = torch.topk(logits, k=3, dim=-1)
         _, idx_k5 = torch.topk(logits, k=5, dim=-1)
         ava_idx = None
         if ava_idx is None:
-            #模型摆烂
+            # 模型摆烂
             ava_idx = idx.item()
         return idx.item(), idx_k3.tolist(), idx_k5.tolist(), ava_idx
 
     @torch.no_grad()
     def play_topk(self, input, topk):
         logits = self(input)
-        logits = logits[:, -1, :]  # crop to just the final time step
+        logits = logits[:, -1, :]
         prob, idx = torch.topk(logits, k=topk, dim=-1)
         if topk == 1:
             return idx.item(), prob.item()
